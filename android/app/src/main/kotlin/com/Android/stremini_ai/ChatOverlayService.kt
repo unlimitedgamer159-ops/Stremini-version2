@@ -41,13 +41,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONObject
-import org.json.JSONArray
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -124,17 +117,13 @@ class ChatOverlayService : Service(), View.OnTouchListener {
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-        .build()
-
     private val aiBackendClient = AIBackendClient()
     private val deviceCommandRouter = DeviceCommandRouter()
     private lateinit var chatCommandCoordinator: ChatCommandCoordinator
     private lateinit var bubbleController: BubbleController
     private lateinit var floatingChatController: FloatingChatController
     private lateinit var voiceController: VoiceController
+    private lateinit var voiceCommandBridge: VoiceCommandBridge
     private lateinit var idleAnimationController: IdleAnimationController
 
     private val controlReceiver = object : BroadcastReceiver() {
@@ -183,6 +172,9 @@ class ChatOverlayService : Service(), View.OnTouchListener {
             deviceCommandRouter = deviceCommandRouter,
             onBotMessage = { message -> addMessageToChatbot(message, isUser = false) }
         )
+        ScreenReaderService.getInstance()?.let { service ->
+            voiceCommandBridge = VoiceCommandBridge(service)
+        }
 
         setupOverlay()
 
@@ -625,256 +617,46 @@ class ChatOverlayService : Service(), View.OnTouchListener {
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         })
     }
-
     /**
-     * Main voice command execution - routes to device control then AI fallback
+     * Main voice command execution - routes through VoiceCommandBridge
      */
     private fun executeVoiceCommand(command: String) {
         serviceScope.launch {
-            val view = autoTaskerView ?: return@launch
-            val statusView = view.findViewById<TextView>(R.id.tv_tasker_status)
-            val outputView = view.findViewById<TextView>(R.id.tv_tasker_output)
+            val view       = autoTaskerView ?: return@launch
+            val statusView = view.findViewById<android.widget.TextView>(R.id.tv_tasker_status)
+            val outputView = view.findViewById<android.widget.TextView>(R.id.tv_tasker_output)
 
-            // 1. Try direct device automation first
-            val directResult = withContext(Dispatchers.IO) {
-                tryDirectDeviceCommand(command)
-            }
-
-            if (directResult.executed) {
-                statusView.text = "✅ ${directResult.statusMessage}"
-                outputView.text = "🎙 Command: $command\n\n✅ ${directResult.details}"
+            // Make sure accessibility service is running
+            val service = ScreenReaderService.getInstance()
+            if (service == null) {
+                statusView?.text = "⚠ Accessibility service not enabled"
+                outputView?.text =
+                    "🎙 Command: $command\n\n❌ Please enable 'Stremini Screen Scanner'\nin Accessibility Settings and try again."
+                if (keepListeningLoop && isAutoTaskerVisible) {
+                    kotlinx.coroutines.delay(1500)
+                    startVoiceCapture()
+                }
                 return@launch
             }
 
-            // 2. Try AI backend for smart plan generation + execution
-            statusView.text = "🤖 Sending to AI..."
-            outputView.text = "🎙 Command: $command\n\n🤖 Asking AI for execution plan..."
-
-            try {
-                val (aiStatus, aiOutput) = withContext(Dispatchers.IO) {
-                    sendVoiceTaskCommandToAI(command)
+            // Use bridge — it handles fast-path, agentic loop, error feedback
+            voiceCommandBridge = VoiceCommandBridge(service)
+            voiceCommandBridge.execute(
+                command = command,
+                onStatus = { status ->
+                    statusView?.text = status
+                },
+                onOutput = { output ->
+                    outputView?.text = output
                 }
-                statusView.text = aiStatus
-                outputView.text = "🎙 Command: $command\n\n$aiOutput"
-            } catch (e: Exception) {
-                statusView.text = "❌ Failed"
-                outputView.text = "🎙 Command: $command\n\n❌ Error: ${e.message}"
-            }
+            )
 
+            // Resume listening if continuous mode is on
             if (keepListeningLoop && isAutoTaskerVisible) {
-                delay(650)
+                kotlinx.coroutines.delay(800)
                 startVoiceCapture()
             }
         }
-    }
-
-    data class DirectCommandResult(
-        val executed: Boolean,
-        val statusMessage: String,
-        val details: String
-    )
-
-    private suspend fun tryDirectDeviceCommand(command: String): DirectCommandResult {
-        val normalized = command.trim().lowercase()
-
-        return when {
-            // WhatsApp messaging
-            normalized.contains("whatsapp") && (normalized.contains("message") || normalized.contains("send")) -> {
-                val contact = extractContact(command)
-                val message = extractMessage(command)
-                if (contact.isNotBlank()) {
-                    val sent = ScreenReaderService.runWhatsAppMessageAutomation(contact, message)
-                    delay(3000) // Wait for automation
-                    DirectCommandResult(true, "WhatsApp message sent to $contact", "Sent '$message' to $contact via WhatsApp")
-                } else {
-                    DirectCommandResult(false, "Contact not found", "Could not extract contact name from: $command")
-                }
-            }
-
-            // Open any app
-            normalized.startsWith("open ") || normalized.startsWith("launch ") -> {
-                val appName = normalized.removePrefix("open ").removePrefix("launch ").trim()
-                val service = ScreenReaderService.getInstance()
-                val opened = service?.openAppByName(appName) ?: false
-                if (opened) {
-                    DirectCommandResult(true, "Opened $appName", "App '$appName' launched successfully")
-                } else {
-                    DirectCommandResult(false, "App not found", "Could not find app: $appName")
-                }
-            }
-
-            // Navigation
-            normalized.contains("go home") || normalized == "home" -> {
-                ScreenReaderService.runGenericAutomation("go home")
-                DirectCommandResult(true, "Navigated home", "Pressed home button")
-            }
-            normalized.contains("go back") || normalized == "back" -> {
-                ScreenReaderService.runGenericAutomation("go back")
-                DirectCommandResult(true, "Navigated back", "Pressed back button")
-            }
-            normalized.contains("recent apps") -> {
-                ScreenReaderService.runGenericAutomation("recent apps")
-                DirectCommandResult(true, "Opened recent apps", "Showed app switcher")
-            }
-            normalized.contains("take screenshot") -> {
-                ScreenReaderService.runGenericAutomation("take screenshot")
-                DirectCommandResult(true, "Screenshot taken", "Screen captured")
-            }
-            normalized.contains("scroll down") -> {
-                ScreenReaderService.runGenericAutomation("scroll down")
-                DirectCommandResult(true, "Scrolled down", "Page scrolled down")
-            }
-            normalized.contains("scroll up") -> {
-                ScreenReaderService.runGenericAutomation("scroll up")
-                DirectCommandResult(true, "Scrolled up", "Page scrolled up")
-            }
-            normalized.startsWith("swipe ") -> {
-                val dir = normalized.removePrefix("swipe ").trim()
-                ScreenReaderService.runGenericAutomation("swipe $dir")
-                DirectCommandResult(true, "Swiped $dir", "Gesture performed: swipe $dir")
-            }
-            normalized.startsWith("tap ") || normalized.startsWith("click ") -> {
-                ScreenReaderService.runGenericAutomation(command)
-                delay(500)
-                DirectCommandResult(true, "Tapped element", "Tapped: ${normalized.removePrefix("tap ").removePrefix("click ")}")
-            }
-            normalized.startsWith("type ") -> {
-                ScreenReaderService.runGenericAutomation(command)
-                DirectCommandResult(true, "Text typed", "Typed: ${normalized.removePrefix("type ")}")
-            }
-            normalized.startsWith("search for ") || normalized.startsWith("search ") -> {
-                ScreenReaderService.runGenericAutomation(command)
-                delay(500)
-                DirectCommandResult(true, "Search performed", "Searched for: ${normalized.removePrefix("search for ").removePrefix("search ")}")
-            }
-            normalized.contains("volume up") -> {
-                ScreenReaderService.runGenericAutomation("volume up")
-                DirectCommandResult(true, "Volume increased", "Volume turned up")
-            }
-            normalized.contains("volume down") -> {
-                ScreenReaderService.runGenericAutomation("volume down")
-                DirectCommandResult(true, "Volume decreased", "Volume turned down")
-            }
-            normalized.contains("mute") -> {
-                ScreenReaderService.runGenericAutomation("mute")
-                DirectCommandResult(true, "Device muted", "Ringer set to silent")
-            }
-            normalized.startsWith("call ") -> {
-                ScreenReaderService.runGenericAutomation(command)
-                DirectCommandResult(true, "Calling...", "Initiating call to ${normalized.removePrefix("call ").trim()}")
-            }
-            normalized.startsWith("go to ") || normalized.startsWith("open website") || normalized.startsWith("browse to ") -> {
-                ScreenReaderService.runGenericAutomation(command)
-                DirectCommandResult(true, "Opening website", "Loading ${command.substringAfterLast(" ")}")
-            }
-            normalized.contains("open settings") || normalized.contains("wifi") ||
-            normalized.contains("bluetooth") || normalized.contains("display settings") -> {
-                ScreenReaderService.runGenericAutomation(command)
-                DirectCommandResult(true, "Opened settings", "Settings opened")
-            }
-            normalized.contains("lock") -> {
-                ScreenReaderService.runGenericAutomation("lock screen")
-                DirectCommandResult(true, "Screen locked", "Device locked")
-            }
-
-            else -> DirectCommandResult(false, "Not a device command", "Sending to AI backend...")
-        }
-    }
-
-    private fun extractContact(command: String): String {
-        val patterns = listOf(
-            Regex("(?:message|send|whatsapp)\\s+(?:to\\s+)?([a-zA-Z][a-zA-Z0-9 _.-]{1,30})(?:\\s+(?:that|saying|:|-|,)|\\s*\$)", RegexOption.IGNORE_CASE),
-            Regex("to\\s+([a-zA-Z][a-zA-Z0-9 _.-]{1,30})(?:\\s+(?:that|saying)|\\s*\$)", RegexOption.IGNORE_CASE)
-        )
-        for (pattern in patterns) {
-            val match = pattern.find(command)
-            if (match != null) return match.groupValues[1].trim()
-        }
-        return ""
-    }
-
-    private fun extractMessage(command: String): String {
-        val patterns = listOf(
-            Regex("(?:that|saying|message:|with message)\\s+(.+)\$", RegexOption.IGNORE_CASE),
-            Regex(":\\s*(.+)\$"),
-            Regex("-\\s*(.+)\$")
-        )
-        for (pattern in patterns) {
-            val match = pattern.find(command)
-            if (match != null) return match.groupValues[1].trim()
-        }
-        return "Hello"
-    }
-
-    private suspend fun sendVoiceTaskCommandToAI(command: String): Pair<String, String> {
-        val service = ScreenReaderService.getInstance()
-        if (service == null) {
-            return "❌ Accessibility service unavailable" to "Enable Stremini Screen Reader in Accessibility settings."
-        }
-
-        val maxAgentSteps = 8
-        var payload = JSONObject().apply {
-            put("query", command)
-            put("command", command)
-            put("step_index", 0)
-            put("screen_state", service.getVisibleScreenState())
-        }
-
-        repeat(maxAgentSteps) { index ->
-            val request = Request.Builder()
-                .url("https://ai-keyboard-backend.vishwajeetadkine705.workers.dev/classify-task")
-                .post(payload.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful) {
-                return "❌ Server error ${response.code}" to "Failed to classify task."
-            }
-
-            val raw = response.body?.string().orEmpty()
-            val json = runCatching { JSONObject(raw) }.getOrElse {
-                return "❌ Invalid backend response" to raw
-            }
-
-            val steps = json.optJSONArray("steps")
-            if (steps != null && steps.length() > 0) {
-                val result = service.executeBackendSteps(steps)
-                val status = if (result.success) "✅ Task completed" else "⚠️ Task partially completed"
-                val output = buildString {
-                    appendLine("Task: ${json.optString("task", "unknown")}")
-                    appendLine("✅ Executed: ${result.completedSteps}")
-                    appendLine("❌ Failed: ${result.failedSteps}")
-                    appendLine()
-                    append(result.message)
-                }
-                return status to output
-            }
-
-            val nextStep = json.optJSONObject("next_step") ?: json.optJSONObject("action")
-            if (nextStep != null) {
-                val oneStep = org.json.JSONArray().put(nextStep)
-                val result = service.executeBackendSteps(oneStep)
-                if (!result.success) {
-                    return "❌ Step failed" to result.message
-                }
-            }
-
-            val done = json.optBoolean("done") || json.optBoolean("completed")
-            if (done) {
-                val summary = json.optString("summary", "Agentic loop completed")
-                return "✅ Task completed" to summary
-            }
-
-            payload = JSONObject().apply {
-                put("query", command)
-                put("command", command)
-                put("step_index", index + 1)
-                put("screen_state", service.getVisibleScreenState())
-                put("previous_response", json)
-            }
-        }
-
-        return "⚠️ Max steps reached" to "Stopped after MAX_AGENT_STEPS without completion."
     }
 
     // ==========================================
