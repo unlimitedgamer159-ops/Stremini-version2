@@ -76,6 +76,16 @@
                 android:value="AI Assistant Overlay"/>
         </service>
 
+        <service
+            android:name=".AutoTaskerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Voice Automation"/>
+        </service>
+
         <!-- Stremini AI Keyboard IME Service -->
         <service
             android:name=".StreminiIME"
