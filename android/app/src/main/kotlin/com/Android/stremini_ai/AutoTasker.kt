@@ -723,17 +723,20 @@ class AutoTaskerOverlay(private val context: Context) {
 
     // Sub-views
     private var tvStatus:   TextView?   = null
+    private var tvStep:     TextView?   = null
     private var tvOutput:   TextView?   = null
     private var tvPartial:  TextView?   = null
     private var waveLayout: LinearLayout? = null
     private var btnClose:   ImageView?  = null
     private var btnMic:     ImageView?  = null
+    private var btnStop:    ImageView?  = null
 
     private val waveAnimators = mutableListOf<ValueAnimator>()
 
     // Callbacks for button taps
     var onCloseTapped: (() -> Unit)? = null
     var onMicTapped:   (() -> Unit)? = null
+    var onStopTapped:  (() -> Unit)? = null
 
     fun show() {
         if (rootView != null) return
@@ -757,6 +760,20 @@ class AutoTaskerOverlay(private val context: Context) {
 
     fun setPartialTranscript(text: String) {
         rootView?.post { tvPartial?.text = if (text.isBlank()) "" else "…$text" }
+    }
+
+    fun setStepBadge(text: String) {
+        rootView?.post {
+            tvStep?.text = text
+            tvStep?.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+        }
+    }
+
+    fun setStopEnabled(enabled: Boolean) {
+        rootView?.post {
+            btnStop?.isEnabled = enabled
+            btnStop?.alpha = if (enabled) 1f else 0.45f
+        }
     }
 
     fun setMicState(listening: Boolean) {
@@ -812,6 +829,33 @@ class AutoTaskerOverlay(private val context: Context) {
             layoutParams = LinearLayout.LayoutParams(0, dp(24), 1f)
         }
         header.addView(title)
+
+        // Step badge
+        val stepBadge = TextView(context).apply {
+            text = ""
+            setTextColor(android.graphics.Color.parseColor("#93C5FD"))
+            textSize = 11f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.marginEnd = dp(10) }
+        }
+        tvStep = stepBadge
+        header.addView(stepBadge)
+
+        // Stop button
+        val stop = ImageView(context).apply {
+            setImageResource(android.R.drawable.ic_media_pause)
+            setColorFilter(android.graphics.Color.parseColor("#F59E0B"))
+            setOnClickListener { if (isEnabled) onStopTapped?.invoke() }
+            layoutParams = LinearLayout.LayoutParams(dp(22), dp(22)).also {
+                it.marginEnd = dp(8)
+            }
+        }
+        btnStop = stop
+        header.addView(stop)
 
         // Close button
         val close = ImageView(context).apply {
@@ -1020,8 +1064,18 @@ class AutoTaskerService : Service() {
             show()
             onCloseTapped = { stopSelf() }
             onMicTapped   = { toggleMic() }
+            onStopTapped  = {
+                brain?.cancel()
+                isExecuting = false
+                overlay?.setStatus("⏹ Stopped")
+                overlay?.setMicState(false)
+                overlay?.setStopEnabled(false)
+                overlay?.setStepBadge("")
+                if (continuousMode) { delay100thenResume() }
+            }
             setMicState(false)
             setStatus("Ready — tap mic to speak")
+            setStopEnabled(false)
         }
 
         // Brain
@@ -1033,7 +1087,21 @@ class AutoTaskerService : Service() {
 
         brain = AutoTaskerBrain(
             service   = service,
-            onStatus  = { msg -> overlay?.setStatus(msg); updateNotification(msg) },
+            onStatus  = { msg ->
+                overlay?.setStatus(msg)
+                updateNotification(msg)
+                val stepMatch = Regex("Step (\\d+)/(\\d+)").find(msg)
+                if (stepMatch != null) {
+                    overlay?.setStepBadge("${stepMatch.groupValues[1]} / ${stepMatch.groupValues[2]}")
+                } else if (
+                    msg.startsWith("✅") ||
+                    msg.startsWith("❌") ||
+                    msg.startsWith("⏹") ||
+                    msg.startsWith("⚠")
+                ) {
+                    overlay?.setStepBadge("")
+                }
+            },
             onOutput  = { text -> overlay?.setOutput(text) }
         )
 
@@ -1106,6 +1174,8 @@ class AutoTaskerService : Service() {
             isExecuting = false
             overlay?.setStatus("⏹ Stopped")
             overlay?.setMicState(false)
+            overlay?.setStopEnabled(false)
+            overlay?.setStepBadge("")
             if (continuousMode) { delay100thenResume() }
             return
         }
@@ -1117,11 +1187,14 @@ class AutoTaskerService : Service() {
         voice?.stop()
         overlay?.setPartialTranscript("")
         overlay?.setMicState(false)
+        overlay?.setStopEnabled(true)
         isExecuting = true
 
         serviceScope.launch {
             brain?.execute(command)
             isExecuting = false
+            overlay?.setStopEnabled(false)
+            overlay?.setStepBadge("")
             if (continuousMode) {
                 delay(1200)
                 overlay?.setStatus("🎤 Listening...")
