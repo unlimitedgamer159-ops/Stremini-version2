@@ -722,18 +722,25 @@ class AutoTaskerOverlay(private val context: Context) {
     private var rootView: View? = null
 
     // Sub-views
-    private var tvStatus:   TextView?   = null
-    private var tvOutput:   TextView?   = null
-    private var tvPartial:  TextView?   = null
-    private var waveLayout: LinearLayout? = null
-    private var btnClose:   ImageView?  = null
-    private var btnMic:     ImageView?  = null
+    private var tvStatus:       TextView?     = null
+    private var tvOutput:       TextView?     = null
+    private var tvPartial:      TextView?     = null
+    private var tvStepBadge:    TextView?     = null
+    private var waveLayout:     LinearLayout? = null
+    private var btnClose:       TextView?     = null
+    private var btnMic:         LinearLayout? = null
+    private var btnStop:        LinearLayout? = null
+    private var btnMicIcon:     TextView?     = null
+    private var divider:        View?         = null
 
     private val waveAnimators = mutableListOf<ValueAnimator>()
 
-    // Callbacks for button taps
+    // Callbacks
     var onCloseTapped: (() -> Unit)? = null
     var onMicTapped:   (() -> Unit)? = null
+    var onStopTapped:  (() -> Unit)? = null
+
+    // ── show / hide ──────────────────────────────────────────────────────────
 
     fun show() {
         if (rootView != null) return
@@ -747,8 +754,27 @@ class AutoTaskerOverlay(private val context: Context) {
         waveAnimators.clear()
     }
 
+    // ── public setters ───────────────────────────────────────────────────────
+
     fun setStatus(text: String) {
-        rootView?.post { tvStatus?.text = text }
+        rootView?.post {
+            tvStatus?.text = text
+            val bgColor = when {
+                text.startsWith("✅") -> android.graphics.Color.parseColor("#1A3D2B")
+                text.startsWith("❌") -> android.graphics.Color.parseColor("#3D1A1A")
+                text.startsWith("⚠") -> android.graphics.Color.parseColor("#3D2E1A")
+                text.startsWith("▶") -> android.graphics.Color.parseColor("#0F1F3D")
+                else                  -> android.graphics.Color.parseColor("#111827")
+            }
+            val borderColor = when {
+                text.startsWith("✅") -> android.graphics.Color.parseColor("#22C55E")
+                text.startsWith("❌") -> android.graphics.Color.parseColor("#EF4444")
+                text.startsWith("⚠") -> android.graphics.Color.parseColor("#F59E0B")
+                text.startsWith("▶") -> android.graphics.Color.parseColor("#3B82F6")
+                else                  -> android.graphics.Color.parseColor("#1E3A5F")
+            }
+            tvStatus?.background = roundedBg(bgColor, borderColor, dp(16).toFloat(), dp(1).toFloat())
+        }
     }
 
     fun setOutput(text: String) {
@@ -756,119 +782,274 @@ class AutoTaskerOverlay(private val context: Context) {
     }
 
     fun setPartialTranscript(text: String) {
-        rootView?.post { tvPartial?.text = if (text.isBlank()) "" else "…$text" }
+        rootView?.post { tvPartial?.text = if (text.isBlank()) "" else "\"$text\"" }
+    }
+
+    fun setStepBadge(text: String) {
+        rootView?.post {
+            tvStepBadge?.text = text
+            tvStepBadge?.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
+        }
     }
 
     fun setMicState(listening: Boolean) {
         rootView?.post {
-            val color = if (listening) android.graphics.Color.parseColor("#22C55E")
-                        else          android.graphics.Color.parseColor("#EF4444")
-            btnMic?.setColorFilter(color)
+            val activeColor = android.graphics.Color.parseColor("#22C55E")
+            val inactiveColor = android.graphics.Color.parseColor("#374151")
+            val iconColor = android.graphics.Color.WHITE
+
+            btnMicIcon?.setTextColor(iconColor)
+            btnMic?.background = roundedBg(
+                if (listening) activeColor else inactiveColor,
+                0, dp(20).toFloat(), 0f
+            )
             if (listening) startWaveAnimation() else stopWaveAnimation()
         }
     }
+
+    fun setStopEnabled(enabled: Boolean) {
+        rootView?.post {
+            btnStop?.isEnabled = enabled
+            btnStop?.alpha = if (enabled) 1f else 0.4f
+        }
+    }
+
+    // ── buildView ─────────────────────────────────────────────────────────────
 
     private fun buildView() {
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
 
-        // ── Root container ────────────────────────────────────────────────────
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(12))
-            background = buildRoundedBackground(
-                android.graphics.Color.parseColor("#EE0F172A"),
-                android.graphics.Color.parseColor("#22A6E2"),
-                dp(20).toFloat(), dp(2).toFloat()
+            setPadding(0, 0, 0, 0)
+            background = roundedBg(
+                android.graphics.Color.parseColor("#F20A0F17"),
+                android.graphics.Color.parseColor("#1E3A5F"),
+                dp(20).toFloat(), dp(1).toFloat()
             )
-            elevation = 20f
+            elevation = 24f
         }
 
-        // ── Header row ────────────────────────────────────────────────────────
         val header = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(14), dp(12), dp(14))
+            background = roundedBg(
+                android.graphics.Color.parseColor("#CC111827"),
+                0, dp(0).toFloat(), 0f
+            )
         }
 
-        // Mic button
-        val mic = ImageView(context).apply {
-            setImageResource(android.R.drawable.ic_btn_speak_now)
-            setColorFilter(android.graphics.Color.parseColor("#22C55E"))
-            setOnClickListener { onMicTapped?.invoke() }
-            layoutParams = LinearLayout.LayoutParams(dp(28), dp(28)).also {
-                it.marginEnd = dp(10)
+        val dot = View(context).apply {
+            background = roundedBg(
+                android.graphics.Color.parseColor("#22C55E"),
+                0, dp(5).toFloat(), 0f
+            )
+            layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).also {
+                it.marginEnd = dp(8)
             }
         }
-        btnMic = mic
-        header.addView(mic)
+        header.addView(dot)
 
-        // Title
         val title = TextView(context).apply {
             text = "Auto Tasker"
             setTextColor(android.graphics.Color.WHITE)
-            textSize = 15f
+            textSize = 14f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            layoutParams = LinearLayout.LayoutParams(0, dp(24), 1f)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
         header.addView(title)
 
-        // Close button
-        val close = ImageView(context).apply {
-            setImageResource(android.R.drawable.ic_menu_close_clear_cancel)
-            setColorFilter(android.graphics.Color.parseColor("#9CA3AF"))
+        val badge = TextView(context).apply {
+            text = ""
+            setTextColor(android.graphics.Color.parseColor("#93C5FD"))
+            textSize = 11f
+            visibility = View.GONE
+            background = roundedBg(
+                android.graphics.Color.parseColor("#1E3A5F"),
+                android.graphics.Color.parseColor("#3B82F6"),
+                dp(8).toFloat(), dp(1).toFloat()
+            )
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.marginEnd = dp(8) }
+        }
+        tvStepBadge = badge
+        header.addView(badge)
+
+        val close = TextView(context).apply {
+            text = "✕"
+            setTextColor(android.graphics.Color.parseColor("#6B7280"))
+            textSize = 16f
+            gravity = android.view.Gravity.CENTER
+            setPadding(dp(4), 0, dp(4), 0)
             setOnClickListener { onCloseTapped?.invoke() }
-            layoutParams = LinearLayout.LayoutParams(dp(22), dp(22))
+            layoutParams = LinearLayout.LayoutParams(dp(28), dp(28))
         }
         btnClose = close
         header.addView(close)
         root.addView(header)
 
-        // ── Partial transcript ────────────────────────────────────────────────
+        val body = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(14))
+        }
+
         val partial = TextView(context).apply {
             text = ""
             setTextColor(android.graphics.Color.parseColor("#60A5FA"))
             textSize = 12f
-            setPadding(0, dp(6), 0, 0)
+            typeface = android.graphics.Typeface.create(
+                android.graphics.Typeface.DEFAULT, android.graphics.Typeface.ITALIC
+            )
+            setPadding(0, 0, 0, dp(6))
         }
         tvPartial = partial
-        root.addView(partial)
+        body.addView(partial)
 
-        // ── Waveform ──────────────────────────────────────────────────────────
-        val wave = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER_VERTICAL
-            setPadding(0, dp(6), 0, dp(6))
-        }
-        waveLayout = wave
-        buildWaveBars(wave)
-        root.addView(wave)
-
-        // ── Status line ───────────────────────────────────────────────────────
         val status = TextView(context).apply {
             text = "Ready — tap mic to speak"
-            setTextColor(android.graphics.Color.parseColor("#22D3EE"))
+            setTextColor(android.graphics.Color.parseColor("#E5E7EB"))
             textSize = 12f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(dp(10), dp(5), dp(10), dp(5))
+            background = roundedBg(
+                android.graphics.Color.parseColor("#111827"),
+                android.graphics.Color.parseColor("#1E3A5F"),
+                dp(16).toFloat(), dp(1).toFloat()
+            )
         }
         tvStatus = status
-        root.addView(status)
+        body.addView(status)
 
-        // ── Output area ───────────────────────────────────────────────────────
+        divider = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(8)
+            )
+        }
+        body.addView(divider)
+
+        val scrollBg = roundedBg(
+            android.graphics.Color.parseColor("#0D111827"),
+            android.graphics.Color.parseColor("#1F2937"),
+            dp(10).toFloat(), dp(1).toFloat()
+        )
         val scroll = android.widget.ScrollView(context).apply {
             layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(160))
-            setPadding(0, dp(8), 0, 0)
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(140)
+            )
+            background = scrollBg
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            isVerticalScrollBarEnabled = false
         }
         val output = TextView(context).apply {
             text = ""
             setTextColor(android.graphics.Color.parseColor("#D1D5DB"))
-            textSize = 12f
+            textSize = 11.5f
             setLineSpacing(dp(2).toFloat(), 1f)
+            typeface = android.graphics.Typeface.MONOSPACE
         }
         tvOutput = output
         scroll.addView(output)
-        root.addView(scroll)
+        body.addView(scroll)
+
+        body.addView(View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(10)
+            )
+        })
+
+        val wave = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.CENTER_HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(24)
+            ).also { it.bottomMargin = dp(10) }
+        }
+        waveLayout = wave
+        buildWaveBars(wave)
+        body.addView(wave)
+
+        val btnRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val stopBtn = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = roundedBg(
+                android.graphics.Color.parseColor("#3D1A1A"),
+                android.graphics.Color.parseColor("#EF4444"),
+                dp(20).toFloat(), dp(1).toFloat()
+            )
+            isEnabled = false
+            alpha = 0.4f
+            setOnClickListener { onStopTapped?.invoke() }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).also { it.marginEnd = dp(12) }
+        }
+        val stopIcon = TextView(context).apply {
+            text = "⏹"
+            setTextColor(android.graphics.Color.parseColor("#EF4444"))
+            textSize = 14f
+            setPadding(0, 0, dp(6), 0)
+        }
+        val stopLabel = TextView(context).apply {
+            text = "Stop"
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 13f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        stopBtn.addView(stopIcon)
+        stopBtn.addView(stopLabel)
+        btnStop = stopBtn
+        btnRow.addView(stopBtn)
+
+        val micBtn = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = roundedBg(
+                android.graphics.Color.parseColor("#374151"),
+                0, dp(20).toFloat(), 0f
+            )
+            setOnClickListener { onMicTapped?.invoke() }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val micIcon = TextView(context).apply {
+            text = "🎙"
+            textSize = 15f
+            setPadding(0, 0, dp(6), 0)
+        }
+        btnMicIcon = micIcon
+        val micLabel = TextView(context).apply {
+            text = "Speak"
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 13f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        micBtn.addView(micIcon)
+        micBtn.addView(micLabel)
+        btnMic = micBtn
+        btnRow.addView(micBtn)
+
+        body.addView(btnRow)
+        root.addView(body)
 
         rootView = root
 
@@ -876,24 +1057,33 @@ class AutoTaskerOverlay(private val context: Context) {
             dp(320), WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            y       = dp(80)
+            gravity = android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL
+            y = dp(80)
         }
 
         wm.addView(root, params)
     }
 
+    // ── wave bars ─────────────────────────────────────────────────────────────
+
     private fun buildWaveBars(container: LinearLayout) {
-        repeat(12) {
+        val colors = listOf(
+            "#3B82F6", "#60A5FA", "#93C5FD", "#60A5FA", "#3B82F6",
+            "#2563EB", "#3B82F6", "#60A5FA", "#93C5FD", "#60A5FA",
+            "#3B82F6", "#2563EB"
+        )
+        colors.forEach { color ->
             val bar = View(context).apply {
-                background = buildRoundedBackground(
-                    android.graphics.Color.parseColor("#34D399"), 0, dp(3).toFloat(), 0f)
-                layoutParams = LinearLayout.LayoutParams(dp(3), dp(8)).also { lp ->
-                    lp.marginStart = dp(3)
-                    lp.marginEnd   = dp(3)
+                background = roundedBg(
+                    android.graphics.Color.parseColor(color),
+                    0, dp(3).toFloat(), 0f
+                )
+                layoutParams = LinearLayout.LayoutParams(dp(3), dp(6)).also {
+                    it.marginStart = dp(2)
+                    it.marginEnd = dp(2)
                 }
             }
             container.addView(bar)
@@ -905,16 +1095,16 @@ class AutoTaskerOverlay(private val context: Context) {
         val bars = waveLayout ?: return
         for (i in 0 until bars.childCount) {
             val bar = bars.getChildAt(i)
-            val animator = ValueAnimator.ofFloat(8f, 24f, 8f).apply {
-                duration    = (400L + i * 80L)
+            val minH = dp(4).toFloat()
+            val maxH = dp(18 + (i % 4) * 4).toFloat()
+            val animator = ValueAnimator.ofFloat(minH, maxH, minH).apply {
+                duration = (350L + i * 70L)
                 repeatCount = ValueAnimator.INFINITE
-                repeatMode  = ValueAnimator.REVERSE
-                startDelay  = (i * 60L)
+                repeatMode = ValueAnimator.REVERSE
+                startDelay = (i * 55L)
                 addUpdateListener { anim ->
-                    val h = (anim.animatedValue as Float)
-                    bar.layoutParams = (bar.layoutParams as LinearLayout.LayoutParams).also { lp ->
-                        lp.height = dp(h.toInt())
-                    }
+                    val h = (anim.animatedValue as Float).toInt()
+                    (bar.layoutParams as LinearLayout.LayoutParams).height = h
                     bar.requestLayout()
                 }
                 start()
@@ -929,16 +1119,18 @@ class AutoTaskerOverlay(private val context: Context) {
         val bars = waveLayout ?: return
         for (i in 0 until bars.childCount) {
             val bar = bars.getChildAt(i)
-            bar.layoutParams = (bar.layoutParams as LinearLayout.LayoutParams).also { lp ->
-                lp.height = dp(8)
-            }
+            (bar.layoutParams as LinearLayout.LayoutParams).height = dp(6)
             bar.requestLayout()
         }
     }
 
-    private fun buildRoundedBackground(
-        fillColor: Int, strokeColor: Int,
-        cornerRadius: Float, strokeWidth: Float
+    // ── helpers ───────────────────────────────────────────────────────────────
+
+    private fun roundedBg(
+        fillColor: Int,
+        strokeColor: Int,
+        cornerRadius: Float,
+        strokeWidth: Float
     ): android.graphics.drawable.GradientDrawable {
         return android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.RECTANGLE
@@ -1020,8 +1212,18 @@ class AutoTaskerService : Service() {
             show()
             onCloseTapped = { stopSelf() }
             onMicTapped   = { toggleMic() }
+            onStopTapped  = {
+                brain?.cancel()
+                isExecuting = false
+                overlay?.setStatus("⏹ Stopped")
+                overlay?.setMicState(false)
+                overlay?.setStopEnabled(false)
+                overlay?.setStepBadge("")
+                if (continuousMode) { delay100thenResume() }
+            }
             setMicState(false)
             setStatus("Ready — tap mic to speak")
+            setStopEnabled(false)
         }
 
         // Brain
@@ -1033,7 +1235,21 @@ class AutoTaskerService : Service() {
 
         brain = AutoTaskerBrain(
             service   = service,
-            onStatus  = { msg -> overlay?.setStatus(msg); updateNotification(msg) },
+            onStatus  = { msg ->
+                overlay?.setStatus(msg)
+                updateNotification(msg)
+                val stepMatch = Regex("Step (\\d+)/(\\d+)").find(msg)
+                if (stepMatch != null) {
+                    overlay?.setStepBadge("${stepMatch.groupValues[1]} / ${stepMatch.groupValues[2]}")
+                } else if (
+                    msg.startsWith("✅") ||
+                    msg.startsWith("❌") ||
+                    msg.startsWith("⏹") ||
+                    msg.startsWith("⚠")
+                ) {
+                    overlay?.setStepBadge("")
+                }
+            },
             onOutput  = { text -> overlay?.setOutput(text) }
         )
 
@@ -1106,6 +1322,8 @@ class AutoTaskerService : Service() {
             isExecuting = false
             overlay?.setStatus("⏹ Stopped")
             overlay?.setMicState(false)
+            overlay?.setStopEnabled(false)
+            overlay?.setStepBadge("")
             if (continuousMode) { delay100thenResume() }
             return
         }
@@ -1117,11 +1335,14 @@ class AutoTaskerService : Service() {
         voice?.stop()
         overlay?.setPartialTranscript("")
         overlay?.setMicState(false)
+        overlay?.setStopEnabled(true)
         isExecuting = true
 
         serviceScope.launch {
             brain?.execute(command)
             isExecuting = false
+            overlay?.setStopEnabled(false)
+            overlay?.setStepBadge("")
             if (continuousMode) {
                 delay(1200)
                 overlay?.setStatus("🎤 Listening...")
