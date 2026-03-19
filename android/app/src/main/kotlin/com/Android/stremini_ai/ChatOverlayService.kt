@@ -510,7 +510,48 @@ class ChatOverlayService : Service(), View.OnTouchListener {
     }
 
     private fun handleKeyboard() {
-        openKeyboardSwitcher()
+        val imeManager = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        val enabledMethods = imeManager.enabledInputMethodList
+        val streminiEnabled = enabledMethods.any { it.packageName == packageName }
+
+        if (!streminiEnabled) {
+            // Not enabled yet — send to settings to enable it
+            try {
+                val intent = Intent(android.provider.Settings.ACTION_INPUT_METHOD_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
+                Toast.makeText(this, "Find 'Stremini AI Keyboard' and enable it", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Could not open keyboard settings", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        // Already enabled — check if it's the active/selected keyboard
+        val currentInputMethod = android.provider.Settings.Secure.getString(
+            contentResolver,
+            android.provider.Settings.Secure.DEFAULT_INPUT_METHOD
+        )
+        val streminiSelected = currentInputMethod?.contains(packageName) == true
+
+        if (streminiSelected) {
+            // It's active — show picker so user can switch away (toggle off)
+            try {
+                imeManager.showInputMethodPicker()
+                Toast.makeText(this, "Switch keyboard to deactivate Stremini AI Keyboard", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Could not open keyboard picker", Toast.LENGTH_SHORT).show()
+            }
+        } else {
+            // Enabled but not selected — show picker to select it (toggle on)
+            try {
+                imeManager.showInputMethodPicker()
+                Toast.makeText(this, "Select 'Stremini AI Keyboard' to activate", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(this, "Could not open keyboard picker", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun openKeyboardSwitcher() {
